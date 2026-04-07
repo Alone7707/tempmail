@@ -1,0 +1,28 @@
+{
+  "name": "tempmail-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Temporary mail backend powered by Koa and SQLite",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "nodemon src/server.js",
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "@koa/cors": "^5.0.0",
+    "@koa/router": "^13.1.1",
+    "bcryptjs": "^3.0.2",
+    "better-sqlite3": "^12.3.0",
+    "dotenv": "^17.4.1",
+    "imapflow": "^1.2.18",
+    "jsonwebtoken": "^9.0.2",
+    "koa": "^3.0.1",
+    "koa-bodyparser": "^4.4.1",
+    "koa-helmet": "^8.0.1",
+    "mailparser": "^3.9.6"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
