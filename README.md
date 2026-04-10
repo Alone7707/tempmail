@@ -50,9 +50,15 @@ backend/    后端项目
 
 ```bash
 cd backend
-cp .env.example .env
+复制 .env.example 为 .env
 npm install
 npm start
+```
+
+如果你在 PowerShell 下，可以用：
+
+```powershell
+Copy-Item .env.example .env
 ```
 
 默认监听：`http://localhost:3000`
@@ -72,13 +78,10 @@ npm run dev
 
 ### 3. 前端 API 地址
 
-前端默认请求：
+前端默认通过 `VITE_API_BASE_URL` 配置后端地址。
 
-```text
-http://172.31.13.144:3000/api
-```
-
-如果你的后端地址不是这个，请在前端启动前设置环境变量：
+如果不额外配置，当前开发环境代码里默认值是一个宿主机 IP，仅适用于当前机器联调。
+正式部署或迁移环境时，建议在启动前显式设置：
 
 ```bash
 VITE_API_BASE_URL=http://<你的后端地址>:3000/api
