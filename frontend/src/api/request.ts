@@ -1,8 +1,20 @@
 import axios from 'axios';
 import { useAuthStore } from '../stores/auth';
 
+const inferDefaultApiBaseUrl = () => {
+  if (import.meta.env.VITE_API_BASE_URL) {
+    return import.meta.env.VITE_API_BASE_URL;
+  }
+
+  if (typeof window !== 'undefined' && window.location?.hostname) {
+    return `http://${window.location.hostname}:3000/api`;
+  }
+
+  return 'http://localhost:3000/api';
+};
+
 const request = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://172.31.13.144:3000/api',
+  baseURL: inferDefaultApiBaseUrl(),
   timeout: 10000,
 });
 

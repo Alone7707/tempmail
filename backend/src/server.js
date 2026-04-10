@@ -25,6 +25,8 @@ const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 
 const mailboxSyncState = new Map();
+const MAILBOX_SYNC_TIMEOUT_MS = Number(process.env.MAILBOX_SYNC_TIMEOUT_MS || 45000);
+const MAILBOX_SYNC_FETCH_WINDOW = Number(process.env.MAILBOX_SYNC_FETCH_WINDOW || 50);
 
 const getMailboxSyncState = (mailboxId) => {
   if (!mailboxSyncState.has(mailboxId)) {
@@ -430,11 +432,25 @@ const syncMailboxMessages = async (mailbox) => {
   });
 
   let synced = 0;
+  let scanned = 0;
   try {
+    console.log('[mailbox-sync] connect start', { mailboxId: mailbox.id, providerConfigId: providerConfig.id });
     await client.connect();
-    await client.mailboxOpen('INBOX');
+    const mailboxLock = await client.mailboxOpen('INBOX');
 
-    for await (const msg of client.fetch('1:*', { source: true, envelope: true, internalDate: true })) {
+    const exists = Number(mailboxLock.exists || 0);
+    if (exists <= 0) {
+      return { synced: 0, scanned: 0, mode: 'imap', reason: '收件箱为空', providerConfigId: providerConfig.id, providerConfigName: providerConfig.name };
+    }
+
+    const fetchWindow = Math.max(1, MAILBOX_SYNC_FETCH_WINDOW);
+    const startSeq = Math.max(1, exists - fetchWindow + 1);
+    const sequenceRange = `${startSeq}:${exists}`;
+
+    console.log('[mailbox-sync] fetch start', { mailboxId: mailbox.id, exists, fetchWindow, sequenceRange });
+
+    for await (const msg of client.fetch(sequenceRange, { source: true, envelope: true, internalDate: true })) {
+      scanned += 1;
       const parsed = await simpleParser(msg.source);
       const rawHeaders = {};
       for (const [key, value] of parsed.headers) rawHeaders[key] = value;
@@ -446,9 +462,39 @@ const syncMailboxMessages = async (mailbox) => {
       synced += 1;
     }
 
-    return { synced, mode: 'imap', reason: '收件同步完成', providerConfigId: providerConfig.id, providerConfigName: providerConfig.name };
+    console.log('[mailbox-sync] fetch done', { mailboxId: mailbox.id, scanned, synced });
+
+    return {
+      synced,
+      scanned,
+      mode: 'imap',
+      reason: '收件同步完成',
+      providerConfigId: providerConfig.id,
+      providerConfigName: providerConfig.name,
+      sequenceRange,
+    };
   } finally {
-    if (client.usable) await client.logout();
+    try {
+      if (client.usable) {
+        await client.logout();
+      }
+    } catch (error) {
+      console.warn('[mailbox-sync] logout failed', { mailboxId: mailbox.id, error: error?.message || String(error) });
+    }
+  }
+};
+
+const withTimeout = async (promise, timeoutMs, message = '同步超时') => {
+  let timer = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 };
 
@@ -463,17 +509,35 @@ const runMailboxSyncInBackground = async (mailbox) => {
   state.finishedAt = null;
   state.lastError = null;
 
-  (async () => {
+  void (async () => {
     try {
-      const result = await syncMailboxMessages(mailbox);
+      const result = await withTimeout(
+        syncMailboxMessages(mailbox),
+        MAILBOX_SYNC_TIMEOUT_MS,
+        `收件同步超时（>${Math.round(MAILBOX_SYNC_TIMEOUT_MS / 1000)}s）`,
+      );
       state.lastResult = result;
     } catch (error) {
+      state.lastResult = null;
       state.lastError = error?.message || '后台同步失败';
+      console.error('[mailbox-sync] failed', {
+        mailboxId: mailbox.id,
+        error: state.lastError,
+      });
     } finally {
       state.running = false;
       state.finishedAt = new Date().toISOString();
     }
-  })();
+  })().catch((error) => {
+    state.lastResult = null;
+    state.lastError = error?.message || '后台同步任务异常退出';
+    state.running = false;
+    state.finishedAt = new Date().toISOString();
+    console.error('[mailbox-sync] unhandled failure', {
+      mailboxId: mailbox.id,
+      error: state.lastError,
+    });
+  });
 
   return state;
 };
