@@ -1,27 +1,46 @@
 <template>
-  <div class="auth-page">
-    <div class="auth-card">
-      <div class="auth-hero">
-        <span class="eyebrow">CREATE ACCOUNT</span>
-        <h1>注册 TempMail 账号</h1>
-        <p>先做本地账号体系，后面再接真实邮件拉取。</p>
-      </div>
-      <el-form :model="form" @submit.prevent="handleRegister">
-        <el-form-item>
-          <el-input v-model="form.username" placeholder="用户名" size="large" />
-        </el-form-item>
-        <el-form-item>
-          <el-input v-model="form.email" placeholder="邮箱" size="large" />
-        </el-form-item>
-        <el-form-item>
-          <el-input v-model="form.password" type="password" placeholder="密码" size="large" show-password />
-        </el-form-item>
-        <el-button type="primary" class="full-width" size="large" @click="handleRegister">注册并登录</el-button>
-        <div class="auth-actions">
-          <RouterLink to="/login">已有账号？去登录</RouterLink>
+  <div class="auth-shell auth-shell-register auth-shell-refined">
+    <div class="auth-background-glow auth-background-glow-left"></div>
+    <div class="auth-background-glow auth-background-glow-right"></div>
+
+    <main class="auth-panel-wrap auth-panel-wrap-wide">
+      <section class="auth-split-layout">
+        <div class="auth-copy-panel">
+          <div class="auth-brand-mark">∞</div>
+          <div class="section-kicker">Create Account</div>
+          <h1>创建新的无限邮箱账户</h1>
+          <p>注册后即可进入完整控制台，管理多个真实邮箱配置，并生成可轮询同步的临时地址。</p>
+          <div class="auth-feature-list">
+            <div class="auth-feature-item"><span>01</span><strong>冷感终端界面</strong></div>
+            <div class="auth-feature-item"><span>02</span><strong>真实邮件接收链路</strong></div>
+            <div class="auth-feature-item"><span>03</span><strong>历史会话持续可追溯</strong></div>
+          </div>
         </div>
-      </el-form>
-    </div>
+
+        <section class="auth-panel auth-panel-register auth-panel-rich">
+          <div class="auth-panel-head">
+            <h2>开始使用</h2>
+            <p>创建一个账户，然后立即进入你的收件控制中心。</p>
+          </div>
+
+          <el-form :model="form" @submit.prevent="handleRegister" class="auth-form-modern auth-form-rich">
+            <el-form-item>
+              <el-input v-model="form.username" placeholder="用户名" size="large" />
+            </el-form-item>
+            <el-form-item>
+              <el-input v-model="form.email" placeholder="注册邮箱" size="large" />
+            </el-form-item>
+            <el-form-item>
+              <el-input v-model="form.password" type="password" placeholder="设置密码" size="large" show-password />
+            </el-form-item>
+            <el-button type="primary" class="full-width auth-submit-btn" size="large" @click="handleRegister">创建账号</el-button>
+            <div class="auth-actions">
+              <RouterLink to="/login">已有账号？去登录</RouterLink>
+            </div>
+          </el-form>
+        </section>
+      </section>
+    </main>
   </div>
 </template>
 
