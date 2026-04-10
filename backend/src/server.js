@@ -24,6 +24,21 @@ fs.mkdirSync(dataDir, { recursive: true });
 const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 
+const mailboxSyncState = new Map();
+
+const getMailboxSyncState = (mailboxId) => {
+  if (!mailboxSyncState.has(mailboxId)) {
+    mailboxSyncState.set(mailboxId, {
+      running: false,
+      startedAt: null,
+      finishedAt: null,
+      lastResult: null,
+      lastError: null,
+    });
+  }
+  return mailboxSyncState.get(mailboxId);
+};
+
 const hasColumn = (table, column) => {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all();
   return rows.some((row) => row.name === column);
@@ -49,24 +64,37 @@ db.exec(`
     domain_suffix TEXT NOT NULL,
     forward_to_email TEXT NOT NULL,
     poll_interval_seconds INTEGER NOT NULL DEFAULT 10,
-    imap_host TEXT,
-    imap_port INTEGER,
-    imap_username TEXT,
-    imap_password TEXT,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS mailbox_provider_configs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    forward_to_email TEXT NOT NULL,
+    imap_host TEXT NOT NULL,
+    imap_port INTEGER NOT NULL DEFAULT 993,
+    imap_username TEXT NOT NULL,
+    imap_password TEXT NOT NULL,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id)
   );
 
   CREATE TABLE IF NOT EXISTS mailbox_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
+    provider_config_id INTEGER,
     alias TEXT NOT NULL,
     address TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     is_active INTEGER NOT NULL DEFAULT 1,
     source_type TEXT NOT NULL DEFAULT 'mock',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(user_id) REFERENCES users(id)
+    FOREIGN KEY(user_id) REFERENCES users(id),
+    FOREIGN KEY(provider_config_id) REFERENCES mailbox_provider_configs(id)
   );
 
   CREATE TABLE IF NOT EXISTS messages (
@@ -88,14 +116,11 @@ db.exec(`
   );
 `);
 
-ensureColumn('app_settings', 'imap_host', 'TEXT');
-ensureColumn('app_settings', 'imap_port', 'INTEGER');
-ensureColumn('app_settings', 'imap_username', 'TEXT');
-ensureColumn('app_settings', 'imap_password', 'TEXT');
+ensureColumn('mailbox_sessions', 'provider_config_id', 'INTEGER');
 ensureColumn('mailbox_sessions', 'source_type', "TEXT NOT NULL DEFAULT 'mock'");
 ensureColumn('messages', 'raw_headers', 'TEXT');
 ensureColumn('messages', 'external_message_id', 'TEXT');
-ensureColumn('messages', 'created_at', "TEXT");
+ensureColumn('messages', 'created_at', 'TEXT');
 
 try {
   db.exec(`
@@ -106,38 +131,13 @@ try {
 } catch {
 }
 
-const settingsExists = db.prepare('SELECT id FROM app_settings WHERE id = 1').get();
-if (!settingsExists) {
+const baseSettingsExists = db.prepare('SELECT id FROM app_settings WHERE id = 1').get();
+if (!baseSettingsExists) {
   db.prepare(`
-    INSERT INTO app_settings (
-      id, domain_suffix, forward_to_email, poll_interval_seconds, imap_host, imap_port, imap_username, imap_password, updated_at
-    ) VALUES (1, ?, ?, 10, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-  `).run(
-    '@770733914.xyz',
-    '1300487655@qq.com',
-    process.env.IMAP_HOST || 'imap.qq.com',
-    Number(process.env.IMAP_PORT || 993),
-    process.env.IMAP_USERNAME || '',
-    process.env.IMAP_PASSWORD || ''
-  );
+    INSERT INTO app_settings (id, domain_suffix, forward_to_email, poll_interval_seconds, updated_at)
+    VALUES (1, ?, ?, 10, CURRENT_TIMESTAMP)
+  `).run('@770733914.xyz', '1300487655@qq.com');
 }
-
-const ensureSettingsColumns = () => {
-  const settings = db.prepare('SELECT * FROM app_settings WHERE id = 1').get();
-  if (!settings.imap_host && process.env.IMAP_HOST) {
-    db.prepare(`
-      UPDATE app_settings
-      SET imap_host = ?, imap_port = ?, imap_username = ?, imap_password = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = 1
-    `).run(
-      process.env.IMAP_HOST,
-      Number(process.env.IMAP_PORT || 993),
-      process.env.IMAP_USERNAME || '',
-      process.env.IMAP_PASSWORD || ''
-    );
-  }
-};
-ensureSettingsColumns();
 
 const demoUser = db.prepare('SELECT id FROM users WHERE username = ?').get('demo');
 if (!demoUser) {
@@ -147,11 +147,25 @@ if (!demoUser) {
     VALUES (?, ?, ?)
   `).run('demo', 'demo@example.com', passwordHash);
 
+  const providerResult = db.prepare(`
+    INSERT INTO mailbox_provider_configs (
+      user_id, name, forward_to_email, imap_host, imap_port, imap_username, imap_password, is_default
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+  `).run(
+    result.lastInsertRowid,
+    '默认 QQ 邮箱',
+    '1300487655@qq.com',
+    process.env.IMAP_HOST || 'imap.qq.com',
+    Number(process.env.IMAP_PORT || 993),
+    process.env.IMAP_USERNAME || '1300487655@qq.com',
+    process.env.IMAP_PASSWORD || 'demo-password'
+  );
+
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
   const sessionResult = db.prepare(`
-    INSERT INTO mailbox_sessions (user_id, alias, address, expires_at, is_active, source_type)
-    VALUES (?, ?, ?, ?, 1, 'mock')
-  `).run(result.lastInsertRowid, 'welcome-demo', 'welcome-demo@770733914.xyz', expiresAt);
+    INSERT INTO mailbox_sessions (user_id, provider_config_id, alias, address, expires_at, is_active, source_type)
+    VALUES (?, ?, ?, ?, ?, 1, 'mock')
+  `).run(result.lastInsertRowid, providerResult.lastInsertRowid, 'welcome-demo', 'welcome-demo@770733914.xyz', expiresAt);
 
   db.prepare(`
     INSERT INTO messages (
@@ -170,6 +184,60 @@ if (!demoUser) {
     'low'
   );
 }
+
+const migrateLegacyProviderConfigs = () => {
+  const userRows = db.prepare('SELECT id FROM users').all();
+  const baseSettings = db.prepare('SELECT * FROM app_settings WHERE id = 1').get();
+  const legacySettingsColumns = db.prepare('PRAGMA table_info(app_settings)').all().map((item) => item.name);
+  const hasLegacyImap = legacySettingsColumns.includes('imap_host');
+
+  for (const user of userRows) {
+    const countRow = db.prepare('SELECT COUNT(*) AS count FROM mailbox_provider_configs WHERE user_id = ?').get(user.id);
+    if (countRow.count > 0) continue;
+
+    const forwardToEmail = baseSettings?.forward_to_email || '1300487655@qq.com';
+    const imapHost = hasLegacyImap ? (baseSettings.imap_host || process.env.IMAP_HOST || '') : (process.env.IMAP_HOST || '');
+    const imapPort = hasLegacyImap ? Number(baseSettings.imap_port || process.env.IMAP_PORT || 993) : Number(process.env.IMAP_PORT || 993);
+    const imapUsername = hasLegacyImap ? (baseSettings.imap_username || process.env.IMAP_USERNAME || '') : (process.env.IMAP_USERNAME || '');
+    const imapPassword = hasLegacyImap ? (baseSettings.imap_password || process.env.IMAP_PASSWORD || '') : (process.env.IMAP_PASSWORD || '');
+
+    db.prepare(`
+      INSERT INTO mailbox_provider_configs (
+        user_id, name, forward_to_email, imap_host, imap_port, imap_username, imap_password, is_default
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+    `).run(
+      user.id,
+      '默认邮箱配置',
+      forwardToEmail,
+      imapHost || 'imap.qq.com',
+      Number(imapPort || 993),
+      imapUsername || forwardToEmail,
+      imapPassword || 'demo-password'
+    );
+  }
+};
+
+const backfillMailboxProviderConfig = () => {
+  const defaultConfigByUser = new Map(
+    db.prepare(`
+      SELECT user_id, id
+      FROM mailbox_provider_configs
+      WHERE is_default = 1
+      ORDER BY id DESC
+    `).all().map((item) => [item.user_id, item.id])
+  );
+
+  const sessions = db.prepare('SELECT id, user_id, provider_config_id FROM mailbox_sessions').all();
+  for (const session of sessions) {
+    if (session.provider_config_id) continue;
+    const providerConfigId = defaultConfigByUser.get(session.user_id) || null;
+    if (!providerConfigId) continue;
+    db.prepare('UPDATE mailbox_sessions SET provider_config_id = ? WHERE id = ?').run(providerConfigId, session.id);
+  }
+};
+
+migrateLegacyProviderConfigs();
+backfillMailboxProviderConfig();
 
 const app = new Koa();
 const router = new Router({ prefix: '/api' });
@@ -213,12 +281,65 @@ const authRequired = async (ctx, next) => {
 
 const createToken = (user) => jwt.sign({ id: user.id, username: user.username, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
 const response = (data, message = 'success') => ({ code: 'OK', message, data });
-const getSettings = () => db.prepare(`
-  SELECT domain_suffix, forward_to_email, poll_interval_seconds, imap_host, imap_port, imap_username,
-         CASE WHEN imap_password IS NOT NULL AND imap_password != '' THEN 1 ELSE 0 END AS has_imap_password
+
+const getBaseSettings = () => db.prepare(`
+  SELECT domain_suffix, forward_to_email, poll_interval_seconds
   FROM app_settings
   WHERE id = 1
 `).get();
+
+const listProviderConfigs = (userId) => db.prepare(`
+  SELECT id, name, forward_to_email, imap_host, imap_port, imap_username,
+         CASE WHEN imap_password IS NOT NULL AND imap_password != '' THEN 1 ELSE 0 END AS has_imap_password,
+         is_default, created_at, updated_at
+  FROM mailbox_provider_configs
+  WHERE user_id = ?
+  ORDER BY is_default DESC, id DESC
+`).all(userId);
+
+const getProviderConfigById = (userId, id) => db.prepare(`
+  SELECT *
+  FROM mailbox_provider_configs
+  WHERE user_id = ? AND id = ?
+`).get(userId, id);
+
+const getDefaultProviderConfig = (userId) => db.prepare(`
+  SELECT *
+  FROM mailbox_provider_configs
+  WHERE user_id = ? AND is_default = 1
+  ORDER BY id DESC
+  LIMIT 1
+`).get(userId);
+
+const getSettings = (userId) => {
+  const base = getBaseSettings();
+  const configs = listProviderConfigs(userId);
+  return {
+    ...base,
+    forward_to_email: configs.find((item) => item.is_default)?.forward_to_email || base.forward_to_email,
+    provider_configs: configs,
+    selected_provider_config_id: configs.find((item) => item.is_default)?.id || null,
+  };
+};
+
+const normalizeProviderConfigPayload = (body = {}) => ({
+  name: String(body.name || '').trim(),
+  forwardToEmail: String(body.forwardToEmail || '').trim(),
+  imapHost: String(body.imapHost || '').trim(),
+  imapPort: Number(body.imapPort || 993),
+  imapUsername: String(body.imapUsername || '').trim(),
+  imapPassword: typeof body.imapPassword === 'string' ? body.imapPassword : '',
+});
+
+const validateProviderConfigPayload = (payload, { requirePassword = true } = {}) => {
+  if (!payload.name) return '配置名称不能为空';
+  if (!payload.forwardToEmail) return '实际接收邮箱不能为空';
+  if (!payload.imapHost) return 'IMAP_HOST 不能为空';
+  if (!payload.imapPort || Number.isNaN(payload.imapPort)) return 'IMAP_PORT 不合法';
+  if (!payload.imapUsername) return 'IMAP_USERNAME 不能为空';
+  if (requirePassword && !payload.imapPassword) return 'IMAP_PASSWORD 不能为空';
+  return null;
+};
 
 const detectRiskLevel = ({ fromEmail, subject, text }) => {
   const joined = `${fromEmail || ''} ${subject || ''} ${text || ''}`.toLowerCase();
@@ -294,16 +415,17 @@ const upsertParsedMessage = ({ mailboxSessionId, parsed, rawHeaders, matchedAlia
 };
 
 const syncMailboxMessages = async (mailbox) => {
-  const settings = db.prepare('SELECT * FROM app_settings WHERE id = 1').get();
-  if (!settings.imap_host || !settings.imap_username || !settings.imap_password) {
-    return { synced: 0, mode: 'mock', reason: 'IMAP 未配置完整' };
+  const baseSettings = getBaseSettings();
+  const providerConfig = mailbox.provider_config_id ? getProviderConfigById(mailbox.user_id, mailbox.provider_config_id) : getDefaultProviderConfig(mailbox.user_id);
+  if (!providerConfig || !providerConfig.imap_host || !providerConfig.imap_username || !providerConfig.imap_password) {
+    return { synced: 0, mode: 'mock', reason: 'IMAP 配置未设置完整' };
   }
 
   const client = new ImapFlow({
-    host: settings.imap_host,
-    port: Number(settings.imap_port || 993),
-    secure: Number(settings.imap_port || 993) === 993,
-    auth: { user: settings.imap_username, pass: settings.imap_password },
+    host: providerConfig.imap_host,
+    port: Number(providerConfig.imap_port || 993),
+    secure: Number(providerConfig.imap_port || 993) === 993,
+    auth: { user: providerConfig.imap_username, pass: providerConfig.imap_password },
     logger: false,
   });
 
@@ -317,17 +439,43 @@ const syncMailboxMessages = async (mailbox) => {
       const rawHeaders = {};
       for (const [key, value] of parsed.headers) rawHeaders[key] = value;
 
-      const matchedAlias = pickForwardedAlias({ parsed, rawHeaders, domainSuffix: settings.domain_suffix });
+      const matchedAlias = pickForwardedAlias({ parsed, rawHeaders, domainSuffix: baseSettings.domain_suffix });
       if (matchedAlias !== mailbox.alias) continue;
 
       upsertParsedMessage({ mailboxSessionId: mailbox.id, parsed, rawHeaders, matchedAlias });
       synced += 1;
     }
 
-    return { synced, mode: 'imap', reason: '收件同步完成' };
+    return { synced, mode: 'imap', reason: '收件同步完成', providerConfigId: providerConfig.id, providerConfigName: providerConfig.name };
   } finally {
     if (client.usable) await client.logout();
   }
+};
+
+const runMailboxSyncInBackground = async (mailbox) => {
+  const state = getMailboxSyncState(mailbox.id);
+  if (state.running) {
+    return state;
+  }
+
+  state.running = true;
+  state.startedAt = new Date().toISOString();
+  state.finishedAt = null;
+  state.lastError = null;
+
+  (async () => {
+    try {
+      const result = await syncMailboxMessages(mailbox);
+      state.lastResult = result;
+    } catch (error) {
+      state.lastError = error?.message || '后台同步失败';
+    } finally {
+      state.running = false;
+      state.finishedAt = new Date().toISOString();
+    }
+  })();
+
+  return state;
 };
 
 router.get('/health', (ctx) => {
@@ -351,6 +499,13 @@ router.post('/auth/register', (ctx) => {
 
   const passwordHash = bcrypt.hashSync(password, 10);
   const result = db.prepare('INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)').run(username, email, passwordHash);
+
+  db.prepare(`
+    INSERT INTO mailbox_provider_configs (
+      user_id, name, forward_to_email, imap_host, imap_port, imap_username, imap_password, is_default
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+  `).run(result.lastInsertRowid, '默认邮箱配置', email, 'imap.qq.com', 993, email, 'demo-password');
+
   const user = db.prepare('SELECT id, username, email, created_at FROM users WHERE id = ?').get(result.lastInsertRowid);
   const token = createToken(user);
   ctx.body = response({ user, token }, '注册成功');
@@ -384,41 +539,154 @@ router.get('/auth/me', authRequired, (ctx) => {
 });
 
 router.get('/settings', authRequired, (ctx) => {
-  ctx.body = response(getSettings());
+  ctx.body = response(getSettings(ctx.state.user.id));
 });
 
 router.put('/settings', authRequired, (ctx) => {
-  const { domainSuffix, forwardToEmail, pollIntervalSeconds, imapHost, imapPort, imapUsername, imapPassword } = ctx.request.body || {};
-  if (!domainSuffix || !forwardToEmail) {
+  const { domainSuffix, pollIntervalSeconds, selectedProviderConfigId } = ctx.request.body || {};
+  if (!domainSuffix) {
     ctx.status = 400;
-    ctx.body = { code: 'BAD_REQUEST', message: '邮箱后缀和接收邮箱不能为空' };
+    ctx.body = { code: 'BAD_REQUEST', message: '邮箱后缀不能为空' };
     return;
   }
 
-  const current = db.prepare('SELECT * FROM app_settings WHERE id = 1').get();
   db.prepare(`
     UPDATE app_settings
-    SET domain_suffix = ?, forward_to_email = ?, poll_interval_seconds = ?, imap_host = ?, imap_port = ?, imap_username = ?, imap_password = ?, updated_at = CURRENT_TIMESTAMP
+    SET domain_suffix = ?, poll_interval_seconds = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = 1
+  `).run(domainSuffix, Number(pollIntervalSeconds || 10));
+
+  if (selectedProviderConfigId) {
+    const target = getProviderConfigById(ctx.state.user.id, selectedProviderConfigId);
+    if (!target) {
+      ctx.status = 404;
+      ctx.body = { code: 'NOT_FOUND', message: '所选邮箱配置不存在' };
+      return;
+    }
+    db.prepare('UPDATE mailbox_provider_configs SET is_default = 0 WHERE user_id = ?').run(ctx.state.user.id);
+    db.prepare('UPDATE mailbox_provider_configs SET is_default = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?').run(selectedProviderConfigId, ctx.state.user.id);
+  }
+
+  ctx.body = response(getSettings(ctx.state.user.id), '配置已更新');
+});
+
+router.get('/provider-configs', authRequired, (ctx) => {
+  ctx.body = response(listProviderConfigs(ctx.state.user.id));
+});
+
+router.post('/provider-configs', authRequired, (ctx) => {
+  const payload = normalizeProviderConfigPayload(ctx.request.body);
+  const validationError = validateProviderConfigPayload(payload, { requirePassword: true });
+  if (validationError) {
+    ctx.status = 400;
+    ctx.body = { code: 'BAD_REQUEST', message: validationError };
+    return;
+  }
+
+  const exists = db.prepare('SELECT COUNT(*) AS count FROM mailbox_provider_configs WHERE user_id = ?').get(ctx.state.user.id).count;
+  const isDefault = exists === 0 ? 1 : 0;
+
+  const result = db.prepare(`
+    INSERT INTO mailbox_provider_configs (
+      user_id, name, forward_to_email, imap_host, imap_port, imap_username, imap_password, is_default, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `).run(
-    domainSuffix,
-    forwardToEmail,
-    Number(pollIntervalSeconds || 10),
-    imapHost || current.imap_host || '',
-    Number(imapPort || current.imap_port || 993),
-    imapUsername || current.imap_username || '',
-    typeof imapPassword === 'string' && imapPassword.length ? imapPassword : (current.imap_password || ''),
+    ctx.state.user.id,
+    payload.name,
+    payload.forwardToEmail,
+    payload.imapHost,
+    payload.imapPort,
+    payload.imapUsername,
+    payload.imapPassword,
+    isDefault
   );
 
-  ctx.body = response(getSettings(), '配置已更新');
+  ctx.body = response(getProviderConfigById(ctx.state.user.id, result.lastInsertRowid), '邮箱配置已添加');
+});
+
+router.put('/provider-configs/:id', authRequired, (ctx) => {
+  const current = getProviderConfigById(ctx.state.user.id, ctx.params.id);
+  if (!current) {
+    ctx.status = 404;
+    ctx.body = { code: 'NOT_FOUND', message: '邮箱配置不存在' };
+    return;
+  }
+
+  const payload = normalizeProviderConfigPayload(ctx.request.body);
+  const validationError = validateProviderConfigPayload(payload, { requirePassword: false });
+  if (validationError) {
+    ctx.status = 400;
+    ctx.body = { code: 'BAD_REQUEST', message: validationError };
+    return;
+  }
+
+  db.prepare(`
+    UPDATE mailbox_provider_configs
+    SET name = ?, forward_to_email = ?, imap_host = ?, imap_port = ?, imap_username = ?, imap_password = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND user_id = ?
+  `).run(
+    payload.name,
+    payload.forwardToEmail,
+    payload.imapHost,
+    payload.imapPort,
+    payload.imapUsername,
+    payload.imapPassword || current.imap_password,
+    ctx.params.id,
+    ctx.state.user.id,
+  );
+
+  ctx.body = response(getProviderConfigById(ctx.state.user.id, ctx.params.id), '邮箱配置已更新');
+});
+
+router.delete('/provider-configs/:id', authRequired, (ctx) => {
+  const current = getProviderConfigById(ctx.state.user.id, ctx.params.id);
+  if (!current) {
+    ctx.status = 404;
+    ctx.body = { code: 'NOT_FOUND', message: '邮箱配置不存在' };
+    return;
+  }
+
+  const total = db.prepare('SELECT COUNT(*) AS count FROM mailbox_provider_configs WHERE user_id = ?').get(ctx.state.user.id).count;
+  if (total <= 1) {
+    ctx.status = 400;
+    ctx.body = { code: 'BAD_REQUEST', message: '至少保留一个邮箱配置' };
+    return;
+  }
+
+  db.prepare('DELETE FROM mailbox_provider_configs WHERE id = ? AND user_id = ?').run(ctx.params.id, ctx.state.user.id);
+
+  if (current.is_default) {
+    const fallback = db.prepare('SELECT id FROM mailbox_provider_configs WHERE user_id = ? ORDER BY id DESC LIMIT 1').get(ctx.state.user.id);
+    if (fallback) {
+      db.prepare('UPDATE mailbox_provider_configs SET is_default = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?').run(fallback.id, ctx.state.user.id);
+    }
+  }
+
+  ctx.body = response({ deleted: true }, '邮箱配置已删除');
+});
+
+router.post('/provider-configs/:id/select', authRequired, (ctx) => {
+  const target = getProviderConfigById(ctx.state.user.id, ctx.params.id);
+  if (!target) {
+    ctx.status = 404;
+    ctx.body = { code: 'NOT_FOUND', message: '邮箱配置不存在' };
+    return;
+  }
+
+  db.prepare('UPDATE mailbox_provider_configs SET is_default = 0 WHERE user_id = ?').run(ctx.state.user.id);
+  db.prepare('UPDATE mailbox_provider_configs SET is_default = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?').run(ctx.params.id, ctx.state.user.id);
+
+  ctx.body = response(getProviderConfigById(ctx.state.user.id, ctx.params.id), '已切换默认邮箱配置');
 });
 
 router.get('/mailboxes/history', authRequired, (ctx) => {
   const items = db.prepare(`
-    SELECT id, alias, address, expires_at, is_active, source_type, created_at
-    FROM mailbox_sessions
-    WHERE user_id = ?
-    ORDER BY id DESC
+    SELECT s.id, s.alias, s.address, s.expires_at, s.is_active, s.source_type, s.created_at,
+           s.provider_config_id, pc.name AS provider_config_name
+    FROM mailbox_sessions s
+    LEFT JOIN mailbox_provider_configs pc ON pc.id = s.provider_config_id
+    WHERE s.user_id = ?
+    ORDER BY s.id DESC
     LIMIT 50
   `).all(ctx.state.user.id);
   ctx.body = response(items);
@@ -426,28 +694,39 @@ router.get('/mailboxes/history', authRequired, (ctx) => {
 
 router.get('/mailboxes/current', authRequired, (ctx) => {
   const mailbox = db.prepare(`
-    SELECT id, alias, address, expires_at, is_active, source_type, created_at
-    FROM mailbox_sessions
-    WHERE user_id = ? AND is_active = 1
-    ORDER BY id DESC
+    SELECT s.id, s.alias, s.address, s.expires_at, s.is_active, s.source_type, s.created_at,
+           s.provider_config_id, pc.name AS provider_config_name
+    FROM mailbox_sessions s
+    LEFT JOIN mailbox_provider_configs pc ON pc.id = s.provider_config_id
+    WHERE s.user_id = ? AND s.is_active = 1
+    ORDER BY s.id DESC
     LIMIT 1
   `).get(ctx.state.user.id);
   ctx.body = response(mailbox);
 });
 
 router.post('/mailboxes/generate', authRequired, (ctx) => {
-  const settings = db.prepare('SELECT domain_suffix, imap_host, imap_username, imap_password FROM app_settings WHERE id = 1').get();
+  const { providerConfigId } = ctx.request.body || {};
+  const baseSettings = getBaseSettings();
+  const providerConfig = providerConfigId ? getProviderConfigById(ctx.state.user.id, providerConfigId) : getDefaultProviderConfig(ctx.state.user.id);
+
+  if (!providerConfig) {
+    ctx.status = 400;
+    ctx.body = { code: 'BAD_REQUEST', message: '请先添加邮箱配置' };
+    return;
+  }
+
   const alias = `mail${Date.now()}`;
-  const address = `${alias}${settings.domain_suffix}`;
+  const address = `${alias}${baseSettings.domain_suffix}`;
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-  const sourceType = settings.imap_host && settings.imap_username && settings.imap_password ? 'imap' : 'mock';
+  const sourceType = providerConfig.imap_host && providerConfig.imap_username && providerConfig.imap_password ? 'imap' : 'mock';
 
   db.prepare('UPDATE mailbox_sessions SET is_active = 0 WHERE user_id = ? AND is_active = 1').run(ctx.state.user.id);
 
   const result = db.prepare(`
-    INSERT INTO mailbox_sessions (user_id, alias, address, expires_at, is_active, source_type)
-    VALUES (?, ?, ?, ?, 1, ?)
-  `).run(ctx.state.user.id, alias, address, expiresAt, sourceType);
+    INSERT INTO mailbox_sessions (user_id, provider_config_id, alias, address, expires_at, is_active, source_type)
+    VALUES (?, ?, ?, ?, ?, 1, ?)
+  `).run(ctx.state.user.id, providerConfig.id, alias, address, expiresAt, sourceType);
 
   db.prepare(`
     INSERT INTO messages (
@@ -458,21 +737,72 @@ router.post('/mailboxes/generate', authRequired, (ctx) => {
     'System',
     'system@tempmail.local',
     '新邮箱已生成',
-    `邮箱 ${address} 已创建，当前${sourceType === 'imap' ? '已启用 IMAP 收件同步' : '仍为演示邮件模式'}。`,
-    `<p>邮箱 <strong>${address}</strong> 已创建，当前${sourceType === 'imap' ? '已启用 IMAP 收件同步' : '仍为演示邮件模式'}。</p>`,
-    `邮箱 ${address} 已创建，当前${sourceType === 'imap' ? '已启用 IMAP 收件同步' : '仍为演示邮件模式'}。`,
-    JSON.stringify({ to: address, source: 'system-generate' }),
+    `邮箱 ${address} 已创建，当前绑定配置：${providerConfig.name}。`,
+    `<p>邮箱 <strong>${address}</strong> 已创建，当前绑定配置：<strong>${providerConfig.name}</strong>。</p>`,
+    `邮箱 ${address} 已创建，当前绑定配置：${providerConfig.name}。`,
+    JSON.stringify({ to: address, source: 'system-generate', providerConfigId: providerConfig.id }),
     new Date().toISOString(),
     'low'
   );
 
-  const mailbox = db.prepare('SELECT id, alias, address, expires_at, is_active, source_type, created_at FROM mailbox_sessions WHERE id = ?').get(result.lastInsertRowid);
+  const mailbox = db.prepare(`
+    SELECT s.id, s.alias, s.address, s.expires_at, s.is_active, s.source_type, s.created_at,
+           s.provider_config_id, pc.name AS provider_config_name
+    FROM mailbox_sessions s
+    LEFT JOIN mailbox_provider_configs pc ON pc.id = s.provider_config_id
+    WHERE s.id = ?
+  `).get(result.lastInsertRowid);
   ctx.body = response(mailbox, '临时邮箱已生成');
+});
+
+router.post('/mailboxes/:id/activate', authRequired, (ctx) => {
+  const mailbox = db.prepare(`
+    SELECT s.id, s.alias, s.address, s.expires_at, s.is_active, s.source_type, s.created_at,
+           s.provider_config_id, pc.name AS provider_config_name
+    FROM mailbox_sessions s
+    LEFT JOIN mailbox_provider_configs pc ON pc.id = s.provider_config_id
+    WHERE s.id = ? AND s.user_id = ?
+  `).get(ctx.params.id, ctx.state.user.id);
+
+  if (!mailbox) {
+    ctx.status = 404;
+    ctx.body = { code: 'NOT_FOUND', message: '邮箱不存在' };
+    return;
+  }
+
+  db.prepare('UPDATE mailbox_sessions SET is_active = 0 WHERE user_id = ?').run(ctx.state.user.id);
+  db.prepare('UPDATE mailbox_sessions SET is_active = 1 WHERE id = ? AND user_id = ?').run(ctx.params.id, ctx.state.user.id);
+
+  if (mailbox.provider_config_id) {
+    db.prepare('UPDATE mailbox_provider_configs SET is_default = 0 WHERE user_id = ?').run(ctx.state.user.id);
+    db.prepare('UPDATE mailbox_provider_configs SET is_default = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?').run(mailbox.provider_config_id, ctx.state.user.id);
+  }
+
+  const activeMailbox = db.prepare(`
+    SELECT s.id, s.alias, s.address, s.expires_at, s.is_active, s.source_type, s.created_at,
+           s.provider_config_id, pc.name AS provider_config_name
+    FROM mailbox_sessions s
+    LEFT JOIN mailbox_provider_configs pc ON pc.id = s.provider_config_id
+    WHERE s.id = ? AND s.user_id = ?
+  `).get(ctx.params.id, ctx.state.user.id);
+
+  ctx.body = response(activeMailbox, '已切换当前邮箱');
+});
+
+router.get('/mailboxes/:id/sync-status', authRequired, (ctx) => {
+  const mailbox = db.prepare('SELECT id FROM mailbox_sessions WHERE id = ? AND user_id = ?').get(ctx.params.id, ctx.state.user.id);
+  if (!mailbox) {
+    ctx.status = 404;
+    ctx.body = { code: 'NOT_FOUND', message: '邮箱不存在' };
+    return;
+  }
+
+  ctx.body = response(getMailboxSyncState(Number(ctx.params.id)));
 });
 
 router.post('/mailboxes/:id/sync', authRequired, async (ctx) => {
   const mailbox = db.prepare(`
-    SELECT id, alias, address, expires_at, is_active, source_type, created_at
+    SELECT *
     FROM mailbox_sessions
     WHERE id = ? AND user_id = ?
   `).get(ctx.params.id, ctx.state.user.id);
@@ -483,8 +813,17 @@ router.post('/mailboxes/:id/sync', authRequired, async (ctx) => {
     return;
   }
 
-  const result = await syncMailboxMessages(mailbox);
-  ctx.body = response(result, result.reason);
+  const state = getMailboxSyncState(mailbox.id);
+  if (!state.running) {
+    await runMailboxSyncInBackground(mailbox);
+  }
+
+  ctx.body = response({
+    accepted: true,
+    running: true,
+    mailboxId: mailbox.id,
+    startedAt: getMailboxSyncState(mailbox.id).startedAt,
+  }, '已开始后台同步');
 });
 
 router.get('/mailboxes/:id/messages', authRequired, (ctx) => {
@@ -523,9 +862,10 @@ router.get('/messages/:id', authRequired, (ctx) => {
   ctx.body = response({ ...message, is_read: 1 });
 });
 
-const port = Number(process.env.PORT || 3000);
 app.use(router.routes());
 app.use(router.allowedMethods());
-app.listen(port, () => {
+
+const port = Number(process.env.PORT || 3000);
+app.listen(port, '0.0.0.0', () => {
   console.log(`TempMail backend is running at http://localhost:${port}`);
 });

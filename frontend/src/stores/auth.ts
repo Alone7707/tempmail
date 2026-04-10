@@ -4,21 +4,40 @@ import request from '../api/request';
 const TOKEN_KEY = 'tempmail_token';
 const USER_KEY = 'tempmail_user';
 
+type AuthUser = {
+  id: number;
+  username: string;
+  email: string;
+};
+
+const readStoredUser = (): AuthUser | null => {
+  try {
+    const raw = localStorage.getItem(USER_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    return {
+      id: Number(parsed.id) || 0,
+      username: String(parsed.username || ''),
+      email: String(parsed.email || ''),
+    };
+  } catch {
+    localStorage.removeItem(USER_KEY);
+    return null;
+  }
+};
+
 export const useAuthStore = defineStore('auth', {
   state: () => ({
     token: localStorage.getItem(TOKEN_KEY) || '',
-    user: JSON.parse(localStorage.getItem(USER_KEY) || 'null') as null | {
-      id: number;
-      username: string;
-      email: string;
-    },
+    user: readStoredUser() as AuthUser | null,
   }),
   actions: {
     persist() {
       localStorage.setItem(TOKEN_KEY, this.token);
       localStorage.setItem(USER_KEY, JSON.stringify(this.user));
     },
-    setAuth(payload: { token: string; user: { id: number; username: string; email: string } }) {
+    setAuth(payload: { token: string; user: AuthUser }) {
       this.token = payload.token;
       this.user = payload.user;
       this.persist();
