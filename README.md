@@ -1,4 +1,4 @@
-﻿# TempMail
+# TempMail
 
 一个基于 **Vue 3 + Element Plus + Pinia + Koa + SQLite** 的临时邮箱系统，支持生成临时邮箱、历史邮箱切换、多邮箱配置管理，以及通过 **Cloudflare 邮件转发 + IMAP** 完成真实收件同步。
 
@@ -18,6 +18,7 @@
   - 轮询间隔
 - 支持异步邮件同步
 - 支持通过 IMAP 接入真实收件链路
+- 支持使用 Docker Compose 一键启动
 
 ## 技术栈
 
@@ -28,6 +29,7 @@
 - Pinia
 - Vue Router
 - Axios
+- Nginx（Docker 部署时用于静态托管和 API 反代）
 
 ### 后端
 - Node.js
@@ -42,9 +44,65 @@
 ```text
 frontend/   前端项目
 backend/    后端项目
+docker-compose.yml
 ```
 
-## 快速启动
+## Docker Compose 启动（推荐）
+
+### 1. 准备环境变量
+
+在项目根目录复制一份 Docker 环境变量模板：
+
+```bash
+cp .env.docker.example .env
+```
+
+如果你在 PowerShell 下，可以用：
+
+```powershell
+Copy-Item .env.docker.example .env
+```
+
+至少建议填写：
+
+```env
+JWT_SECRET=tempmail-dev-secret
+IMAP_HOST=imap.qq.com
+IMAP_PORT=993
+IMAP_USERNAME=你的真实邮箱
+IMAP_PASSWORD=你的邮箱授权码
+MAILBOX_SYNC_TIMEOUT_MS=45000
+MAILBOX_SYNC_FETCH_WINDOW=50
+```
+
+### 2. 启动
+
+```bash
+docker compose up -d --build
+```
+
+启动后默认访问：
+
+- 前端入口：`http://localhost`
+- 后端健康检查：`http://localhost/api/health`
+
+### 3. 停止
+
+```bash
+docker compose down
+```
+
+### 4. 数据持久化
+
+SQLite 数据库会保存在宿主机目录：
+
+```text
+backend/data/
+```
+
+容器重建后数据不会丢。
+
+## 本地开发启动
 
 ### 1. 启动后端
 
@@ -84,7 +142,9 @@ npm run dev
 - 浏览器环境下会自动推断为 `http://当前访问主机名:3000/api`
 - 非浏览器环境下回退为 `http://localhost:3000/api`
 
-如需手动指定，可在启动前设置：
+在 Docker Compose 中，前端构建时会固定使用相对地址 `/api`，由 Nginx 自动反代到后端。
+
+如需本地开发时手动指定，可在启动前设置：
 
 ```bash
 VITE_API_BASE_URL=http://<你的后端地址>:3000/api
@@ -97,7 +157,7 @@ VITE_API_BASE_URL=http://<你的后端地址>:3000/api
 
 ## 环境变量
 
-当前仓库中的 `backend/.env.example`：
+### 本地开发：`backend/.env.example`
 
 ```env
 PORT=3000
@@ -108,7 +168,19 @@ IMAP_USERNAME=
 IMAP_PASSWORD=
 ```
 
-> 注意：真实凭证只允许放在服务端 `.env`，不要提交到前端或仓库。
+### Docker：`.env.docker.example`
+
+```env
+JWT_SECRET=tempmail-dev-secret
+IMAP_HOST=imap.qq.com
+IMAP_PORT=993
+IMAP_USERNAME=
+IMAP_PASSWORD=
+MAILBOX_SYNC_TIMEOUT_MS=45000
+MAILBOX_SYNC_FETCH_WINDOW=50
+```
+
+> 注意：真实凭证只允许放在服务端 `.env` 或 Docker 环境变量中，不要提交到前端或仓库。
 
 ## 真实收件说明
 
@@ -176,12 +248,13 @@ IMAP_PASSWORD=
 - 前端深色控制台风格 UI
 - 同步状态回写与超时兜底
 - 最近邮件窗口同步，避免全量扫描 IMAP 收件箱
+- Docker Compose 一键启动方案
 
 ## 当前限制
 
 - 附件解析还没有单独落表和下载流
 - 原始收件人识别仍依赖转发头，后续可能需要根据真实样本继续增强
-- 暂未补充完整自动化测试与部署脚本
+- 暂未补充完整自动化测试
 
 ## 后续建议
 

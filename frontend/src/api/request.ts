@@ -2,8 +2,12 @@ import axios from 'axios';
 import { useAuthStore } from '../stores/auth';
 
 const inferDefaultApiBaseUrl = () => {
-  if (import.meta.env.VITE_API_BASE_URL) {
-    return import.meta.env.VITE_API_BASE_URL;
+  const envBaseUrl = import.meta.env.VITE_API_BASE_URL;
+  if (envBaseUrl) {
+    if (envBaseUrl.startsWith('/')) {
+      return envBaseUrl;
+    }
+    return envBaseUrl.replace(/\/$/, '');
   }
 
   if (typeof window !== 'undefined' && window.location?.hostname) {
